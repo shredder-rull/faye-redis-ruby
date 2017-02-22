@@ -6,6 +6,8 @@ require File.expand_path('../redis_factory', __FILE__)
 module Faye
   class Redis
 
+    include Faye::Logging
+
     DEFAULT_GC   = 60
     LOCK_TIMEOUT = 120
 
@@ -23,7 +25,7 @@ module Faye
 
     def init
       return if @redis or !EventMachine.reactor_running?
-
+      debug 'init with config ?', @options
       gc     = @options[:gc]        || DEFAULT_GC
       @ns    = @options[:namespace] || ''
       @redis = @factory.call
@@ -45,6 +47,7 @@ module Faye
 
     def disconnect
       return unless @redis
+      debug 'Disconnect'
       @subscriber.unsubscribe(@message_channel)
       @subscriber.unsubscribe(@close_channel)
       EventMachine.cancel_timer(@gc)
@@ -53,6 +56,7 @@ module Faye
     def create_client(&callback)
       init
       client_id = @server.generate_id
+      debug 'Client creation start'
       @redis.zadd(@ns + '/clients', 0, client_id) do |added|
         next create_client(&callback) if added == 0
         @server.debug 'Created new client ?', client_id
@@ -60,6 +64,7 @@ module Faye
         @server.trigger(:handshake, client_id)
         callback.call(client_id)
       end
+      debug 'Client creation end: ?', client_id
     end
 
     def client_exists(client_id, &callback)
@@ -73,6 +78,7 @@ module Faye
 
     def destroy_client(client_id, &callback)
       init
+      debug 'Client destroing start ?', client_id
       @redis.zadd(@ns + '/clients', 0, client_id) do
         @redis.smembers(@ns + "/clients/#{client_id}/channels") do |channels|
           i, n = 0, channels.size
@@ -86,6 +92,7 @@ module Faye
           end
         end
       end
+      debug 'Client destroing end ?', client_id
     end
 
     def after_subscriptions_removed(client_id, &callback)
@@ -111,6 +118,7 @@ module Faye
 
     def subscribe(client_id, channel, &callback)
       init
+      debug 'Client subscribe start ?: ?', client_id, channel
       @redis.sadd(@ns + "/clients/#{client_id}/channels", channel) do |added|
         @server.trigger(:subscribe, client_id, channel) if added == 1
       end
@@ -118,10 +126,12 @@ module Faye
         @server.debug 'Subscribed client ? to channel ?', client_id, channel
         callback.call if callback
       end
+      debug 'Client subscribe end ?: ?', client_id, channel
     end
 
     def unsubscribe(client_id, channel, &callback)
       init
+      debug 'Client unsubscribe start ?: ?', client_id, channel
       @redis.srem(@ns + "/clients/#{client_id}/channels", channel) do |removed|
         @server.trigger(:unsubscribe, client_id, channel) if removed == 1
       end
@@ -129,11 +139,12 @@ module Faye
         @server.debug 'Unsubscribed client ? from channel ?', client_id, channel
         callback.call if callback
       end
+      debug 'Client unsubscribe end ?: ?', client_id, channel
     end
 
     def publish(message, channels)
       init
-      @server.debug 'Publishing message ?', message
+      @server.debug 'Publishing message ?', message, channels
 
       json_message = MultiJson.dump(message)
       channels     = Channel.expand(message['channel'])
@@ -158,6 +169,7 @@ module Faye
 
     def empty_queue(client_id)
       return unless @server.has_connection?(client_id)
+      debug 'Client empty_queue start ?: ?', client_id
       init
 
       key = @ns + "/clients/#{client_id}/messages"
@@ -170,6 +182,7 @@ module Faye
         messages = json_messages.map { |json| MultiJson.load(json) }
         @server.deliver(client_id, messages)
       end
+      debug 'Client empty_queue end ?: ?', client_id
     end
 
   private
@@ -180,6 +193,7 @@ module Faye
 
     def gc
       timeout = @server.timeout
+      debug 'gc start'
       return unless Numeric === timeout
 
       with_lock 'gc' do |release_lock|
@@ -196,12 +210,15 @@ module Faye
           end
         end
       end
+      debug 'gc end'
     end
 
     def with_lock(lock_name, &block)
       lock_key     = @ns + '/locks/' + lock_name
       current_time = get_current_time
       expiry       = current_time + LOCK_TIMEOUT * 1000 + 1
+
+      debug 'With lock ?', expiry
 
       release_lock = lambda do
         @redis.del(lock_key) if get_current_time < expiry
@@ -210,16 +227,23 @@ module Faye
       @redis.setnx(lock_key, expiry) do |set|
         next block.call(release_lock) if set == 1
 
+        debug 'Lock setnx ?', set
+
         @redis.get(lock_key) do |timeout|
+          debug 'Lock timeout empty' unless timeout
           next unless timeout
 
           lock_timeout = timeout.to_i(10)
+          debug 'Lock current_time < lock_timeout' if current_time < lock_timeout
           next if current_time < lock_timeout
 
           @redis.getset(lock_key, expiry) do |old_value|
+            debug 'Lock getset' if old_value == timeout
             block.call(release_lock) if old_value == timeout
           end
         end
+
+        debug 'Lock end'
       end
     end
 
