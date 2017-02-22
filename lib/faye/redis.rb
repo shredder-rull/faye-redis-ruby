@@ -58,6 +58,7 @@ module Faye
       client_id = @server.generate_id
       debug 'Client creation start'
       @redis.zadd(@ns + '/clients', 0, client_id) do |added|
+        debug 'Client zadd ? added'
         next create_client(&callback) if added == 0
         @server.debug 'Created new client ?', client_id
         ping(client_id)
@@ -169,7 +170,7 @@ module Faye
 
     def empty_queue(client_id)
       return unless @server.has_connection?(client_id)
-      debug 'Client empty_queue start ?: ?', client_id
+      debug 'Client empty_queue start ?', client_id
       init
 
       key = @ns + "/clients/#{client_id}/messages"
@@ -182,7 +183,7 @@ module Faye
         messages = json_messages.map { |json| MultiJson.load(json) }
         @server.deliver(client_id, messages)
       end
-      debug 'Client empty_queue end ?: ?', client_id
+      debug 'Client empty_queue end ?', client_id
     end
 
   private
